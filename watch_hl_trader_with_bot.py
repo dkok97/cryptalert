@@ -6,12 +6,12 @@ import warnings
 import re
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
+from typing import Dict
 import websockets
 import httpx
 import discord
 from discord.ext import commands
 
-# Suppress SSL warnings when using verify=False (needed for some corporate networks)
 warnings.filterwarnings('ignore', message='Unverified HTTPS request')
 
 load_dotenv()
@@ -19,10 +19,7 @@ load_dotenv()
 HL_WS = "wss://api.hyperliquid.xyz/ws"
 HL_API = "https://api.hyperliquid.xyz/info"
 
-ADDR = os.getenv("WATCH_ADDRESS", "").strip()
-DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "").strip()
-DISCORD_CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID", "0")) if os.getenv("DISCORD_CHANNEL_ID") else None
 TZ = ZoneInfo(os.getenv("LOCAL_TZ", "America/New_York"))
 AGGREGATE_BY_TIME = os.getenv("AGGREGATE_BY_TIME", "true").lower() == "true"
 
@@ -32,21 +29,13 @@ COIN_ALLOWLIST = set(
     [c.strip().upper() for c in os.getenv("COIN_ALLOWLIST", "").split(",") if c.strip()]
 )
 
+# Store mapping of channel_id -> address
+tracked_addresses: Dict[int, str] = {}
+
+# Discord bot setup
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
-
-async def send_alert(text: str):
-    """Send alert via Discord webhook"""
-    if not DISCORD_WEBHOOK:
-        print(text, flush=True)
-        return
-    async with httpx.AsyncClient(timeout=10, verify=False) as client:
-        try:
-            await client.post(DISCORD_WEBHOOK, json={"content": text})
-            print(text, flush=True)
-        except Exception as e:
-            print(f"Error sending Discord alert: {e}", flush=True)
 
 async def fetch_recent_trades(addr: str, limit: int = 20):
     """Fetch recent trades for the address"""
@@ -90,47 +79,137 @@ def format_trade(fill):
         text += f" • ~${fmt_usdc(notional)}"
     return text
 
+def extract_last_5_chars(address: str) -> str:
+    """Extract last 5 chars from address (excluding 0x)"""
+    return address[-5:].lower()
+
+def validate_address(address: str) -> bool:
+    """Validate Ethereum address format"""
+    return address.startswith("0x") and len(address) == 42
+
 @bot.event
 async def on_ready():
     print(f"✅ Discord bot logged in as {bot.user}")
     print(f"📺 Bot is in {len(bot.guilds)} server(s)")
     for guild in bot.guilds:
         print(f"   - {guild.name} (ID: {guild.id})")
-    if DISCORD_CHANNEL_ID:
-        print(f"🔒 Bot will only respond in channel ID: {DISCORD_CHANNEL_ID}")
-    else:
-        print(f"🌐 Bot will respond in all channels where it has permissions")
+    print(f"\n💡 Usage:")
+    print(f"   1. Create channel: alert-{extract_last_5_chars('0xc2a30212a8ddac9e123944d6e29faddce994e5f2')}")
+    print(f"   2. In that channel: track 0xc2a30212a8ddac9e123944d6e29faddce994e5f2")
+    print(f"   3. Get real-time alerts in that channel!\n")
 
 @bot.event
 async def on_message(message):
-    print(f"📨 Message received: '{message.content}' from {message.author} in #{message.channel.name} (ID: {message.channel.id})")
+    print(f"📨 Message: '{message.content}' from {message.author} in #{message.channel.name} (ID: {message.channel.id})")
     
     if message.author == bot.user:
-        print("   ↳ Ignoring (from bot itself)")
+        print("   ↳ Ignoring (from bot)")
         return
     
-    if DISCORD_CHANNEL_ID and message.channel.id != DISCORD_CHANNEL_ID:
-        print(f"   ↳ Ignoring (not in configured channel {DISCORD_CHANNEL_ID})")
-        return
+    content = message.content.strip()
     
-    print(f"   ↳ Processing message...")
-    
-    # Check for "last N" command
-    match = re.match(r'^last\s+(\d+)$', message.content.lower().strip())
-    if match:
-        n = int(match.group(1))
-        n = min(n, 100)
-        print(f"   ↳ Matched 'last {n}' command")
+    # Command: track <address>
+    track_match = re.match(r'^track\s+(0x[a-fA-F0-9]{40})$', content, re.IGNORECASE)
+    if track_match:
+        address = track_match.group(1).lower()
         
-        await message.channel.send(f"🔍 Fetching last {n} trades for `{ADDR[:8]}...{ADDR[-6:]}`...")
-        
-        trades = await fetch_recent_trades(ADDR, limit=n)
-        
-        if not trades:
-            await message.channel.send("❌ No recent trades found.")
+        if not validate_address(address):
+            await message.channel.send(f"❌ Invalid address format: {address}")
             return
         
-        # Split into chunks of 10 trades per message (Discord has message length limits)
+        # Extract last 5 chars
+        last_5 = extract_last_5_chars(address)
+        expected_channel = f"alert-{last_5}"
+        
+        # Check if channel name matches
+        if not message.channel.name.startswith("alert-"):
+            await message.channel.send(
+                f"⚠️ This command should be used in a channel starting with `alert-`\n"
+                f"💡 Create a channel called `{expected_channel}` for this address"
+            )
+            return
+        
+        if message.channel.name != expected_channel:
+            await message.channel.send(
+                f"⚠️ Channel name mismatch!\n"
+                f"Expected: `{expected_channel}` (based on address ending)\n"
+                f"Current: `{message.channel.name}`\n\n"
+                f"💡 Either:\n"
+                f"- Rename this channel to `{expected_channel}`, or\n"
+                f"- Use the address ending with `...{message.channel.name[6:]}`"
+            )
+            return
+        
+        # Add to tracked addresses
+        tracked_addresses[message.channel.id] = address
+        print(f"   ↳ Now tracking {address} in #{message.channel.name}")
+        
+        await message.channel.send(
+            f"✅ **Now tracking** `{address}`\n"
+            f"📊 Fetching recent trades..."
+        )
+        
+        # Show last 10 trades
+        trades = await fetch_recent_trades(address, limit=10)
+        if trades:
+            lines = [f"📈 **Last {len(trades)} trades:**\n```"]
+            for fill in trades:
+                lines.append(format_trade(fill))
+            lines.append("```")
+            await message.channel.send("\n".join(lines))
+        else:
+            await message.channel.send("No recent trades found (new address or no history)")
+        
+        await message.channel.send(f"🔔 You'll now get real-time alerts here!")
+        return
+    
+    # Command: untrack
+    if content.lower() == "untrack":
+        if message.channel.id in tracked_addresses:
+            address = tracked_addresses[message.channel.id]
+            del tracked_addresses[message.channel.id]
+            await message.channel.send(f"✅ Stopped tracking `{address}`")
+            print(f"   ↳ Untracked {address} from #{message.channel.name}")
+        else:
+            await message.channel.send("❌ No address is being tracked in this channel")
+        return
+    
+    # Command: status
+    if content.lower() == "status":
+        if message.channel.id in tracked_addresses:
+            address = tracked_addresses[message.channel.id]
+            await message.channel.send(
+                f"✅ **Currently tracking:** `{address}`\n"
+                f"📺 Channel: #{message.channel.name}"
+            )
+        else:
+            await message.channel.send(
+                f"❌ No address tracked in this channel\n"
+                f"💡 Use: `track 0x...` to start tracking"
+            )
+        return
+    
+    # Command: last [N]
+    match = re.match(r'^last\s+(\d+)$', content.lower())
+    if match or content.lower() == "last":
+        n = int(match.group(1)) if match else 20
+        n = min(n, 100)
+        
+        if message.channel.id not in tracked_addresses:
+            await message.channel.send("❌ No address tracked. Use `track 0x...` first")
+            return
+        
+        address = tracked_addresses[message.channel.id]
+        print(f"   ↳ Fetching last {n} for {address}")
+        
+        await message.channel.send(f"🔍 Fetching last {n} trades...")
+        
+        trades = await fetch_recent_trades(address, limit=n)
+        if not trades:
+            await message.channel.send("❌ No trades found")
+            return
+        
+        # Send in chunks of 10
         chunk_size = 10
         for i in range(0, len(trades), chunk_size):
             chunk = trades[i:i+chunk_size]
@@ -139,31 +218,7 @@ async def on_message(message):
                 lines.append(format_trade(fill))
             lines.append("```")
             await message.channel.send("\n".join(lines))
-        
-        await message.channel.send(f"✅ Displayed {len(trades)} trades")
         return
-    
-    if message.content.lower().strip() == "last":
-        print(f"   ↳ Matched 'last' command")
-        await message.channel.send(f"🔍 Fetching last 20 trades for `{ADDR[:8]}...{ADDR[-6:]}`...")
-        
-        trades = await fetch_recent_trades(ADDR, limit=20)
-        
-        if not trades:
-            await message.channel.send("❌ No recent trades found.")
-            return
-        
-        chunk_size = 10
-        for i in range(0, len(trades), chunk_size):
-            chunk = trades[i:i+chunk_size]
-            lines = [f"📊 **Recent Trades {i+1}-{i+len(chunk)}:**\n```"]
-            for fill in chunk:
-                lines.append(format_trade(fill))
-            lines.append("```")
-            await message.channel.send("\n".join(lines))
-        return
-    
-    print(f"   ↳ No command matched. Message was: '{message.content}'")
 
 async def subscribe_userfills(ws, addr):
     sub = {
@@ -175,6 +230,7 @@ async def subscribe_userfills(ws, addr):
         },
     }
     await ws.send(json.dumps(sub))
+    print(f"   📡 Subscribed to {addr}")
 
 async def ping_loop(ws):
     while True:
@@ -187,37 +243,40 @@ async def ping_loop(ws):
 async def run_trade_monitor():
     """Monitor real-time trades via WebSocket"""
     backoff = 1
+    subscribed_addresses = set()
     
     while True:
         try:
             async with websockets.connect(HL_WS, ping_interval=None, close_timeout=5) as ws:
-                await subscribe_userfills(ws, ADDR)
                 asyncio.create_task(ping_loop(ws))
-                await send_alert(f"🔔 Listening for trades by {ADDR} on Hyperliquid…")
+                print(f"🔌 Connected to Hyperliquid WebSocket")
                 
-                # Fetch and display last 20 trades on startup
-                print("\n📊 Fetching last 20 trades...\n")
-                recent_trades = await fetch_recent_trades(ADDR, limit=20)
-                if recent_trades:
-                    print(f"Found {len(recent_trades)} recent trades:\n")
-                    for fill in recent_trades:
-                        print(f"  {format_trade(fill)}")
-                    print(f"\n✅ Connected! Now listening for new trades...\n")
-                else:
-                    print("No recent trades found (or address has no trading history)\n")
-
+                # Subscribe to all tracked addresses
+                for channel_id, address in tracked_addresses.items():
+                    if address not in subscribed_addresses:
+                        await subscribe_userfills(ws, address)
+                        subscribed_addresses.add(address)
+                
+                print(f"✅ Monitoring {len(subscribed_addresses)} addresses")
+                
                 async for raw in ws:
                     msg = json.loads(raw)
                     ch = msg.get("channel")
                     data = msg.get("data", {})
+                    
                     if ch == "userFills":
                         if data.get("isSnapshot"):
                             continue
+                        
+                        # Find which channel(s) should get this alert
+                        user_address = data.get("user", "").lower()
+                        
                         fills = data.get("fills") or []
                         for f in fills:
                             coin = f.get("coin")
                             if COIN_ALLOWLIST and (coin or "").upper() not in COIN_ALLOWLIST:
                                 continue
+                            
                             px, sz, side, ts = f.get("px"), f.get("sz"), f.get("side"), f.get("time")
                             
                             notional = None
@@ -228,25 +287,41 @@ async def run_trade_monitor():
                             if notional is not None and notional < MIN_NOTIONAL_USDC:
                                 continue
 
-                            text = f"💥 {format_trade(f)}"
-                            await send_alert(text)
+                            text = f"💥 **NEW TRADE**\n```{format_trade(f)}```"
+                            
+                            # Send to all channels tracking this address
+                            for channel_id, address in tracked_addresses.items():
+                                if address.lower() == user_address:
+                                    try:
+                                        channel = bot.get_channel(channel_id)
+                                        if channel:
+                                            await channel.send(text)
+                                            print(f"   📤 Sent alert to #{channel.name}")
+                                    except Exception as e:
+                                        print(f"   ❌ Failed to send to channel {channel_id}: {e}")
+                    
+                    # Check if we need to subscribe to new addresses
+                    current_addresses = set(tracked_addresses.values())
+                    new_addresses = current_addresses - subscribed_addresses
+                    for address in new_addresses:
+                        await subscribe_userfills(ws, address)
+                        subscribed_addresses.add(address)
+                        
         except Exception as e:
             print(f"[reconnect] {e}")
+            subscribed_addresses.clear()
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 30)
             continue
 
 async def main():
     """Run both the Discord bot and trade monitor concurrently"""
-    if not ADDR or not ADDR.startswith("0x") or len(ADDR) != 42:
-        print("❌ Error: WATCH_ADDRESS must be a 42-char hex address")
-        return
-    
     if not DISCORD_BOT_TOKEN:
         print("❌ Error: DISCORD_BOT_TOKEN not set in .env")
         print("📝 Get a bot token from: https://discord.com/developers/applications")
         return
     
+    # Run both concurrently
     async with asyncio.TaskGroup() as tg:
         tg.create_task(bot.start(DISCORD_BOT_TOKEN))
         tg.create_task(run_trade_monitor())
@@ -256,4 +331,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\n👋 Shutting down...")
-
