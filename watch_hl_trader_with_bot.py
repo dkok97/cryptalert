@@ -4,6 +4,8 @@ import asyncio
 import datetime
 import warnings
 import re
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from typing import Dict
@@ -327,7 +329,27 @@ async def main():
         tg.create_task(run_trade_monitor())
 
 if __name__ == "__main__":
+    # Minimal HTTP health server for Cloud Run
+    class _HealthHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, format, *args):
+            return
+
+    def start_health_server():
+        port = int(os.environ.get("PORT", "8080"))
+        server = HTTPServer(("0.0.0.0", port), _HealthHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        print(f"🩺 Health server listening on :{port}")
+        return server
+
     try:
+        start_health_server()
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\n👋 Shutting down...")

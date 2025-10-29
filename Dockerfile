@@ -7,8 +7,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application
-COPY watch_hl_trader.py .
+COPY watch_hl_trader_with_bot.py .
 
 # Run the bot
-CMD ["python", "watch_hl_trader.py"]
+ENV PYTHONUNBUFFERED=1
+CMD ["python", "watch_hl_trader_with_bot.py"]
 
