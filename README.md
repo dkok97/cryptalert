@@ -16,15 +16,22 @@ Currently watching: **[0xc2a30212a8ddac9e123944d6e29faddce994e5f2](https://hyper
 
 ### 1. Create Virtual Environment
 
+**Important:** Use Python 3.11 or 3.12 (Python 3.13 has SSL compatibility issues with Hyperliquid's API)
+
 ```bash
-python3 -m venv .venv
+# Use Python 3.12 (recommended)
+python3.12 -m venv .venv
+
+# Or Python 3.11
+# python3.11 -m venv .venv
+
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 ```
 
 ### 2. Install Dependencies
 
 ```bash
-pip install websockets httpx python-dotenv
+pip install -r requirements.txt
 ```
 
 ### 3. Configure Discord Webhook
@@ -89,6 +96,18 @@ You should see:
 
 ## Troubleshooting
 
+### SSL Certificate Error (Python 3.13)
+```
+[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed
+```
+**Solution:** Use Python 3.11 or 3.12 instead:
+```bash
+rm -rf .venv
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
 ### "WATCH_ADDRESS must be a 42-char hex address"
 - Ensure the address starts with `0x` and is exactly 42 characters
 
@@ -104,6 +123,7 @@ You should see:
 - The script will automatically reconnect on network issues
 - Check your internet connection
 - Verify Hyperliquid API is accessible
+- Run `python3 test_connection.py` to test connectivity
 
 ## Advanced Usage
 
